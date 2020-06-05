@@ -1,8 +1,13 @@
 build
-bin
+#bin
 .vs
 *.sln
 *.vcxproj
 *.vcxproj.filters
 *.vcxproj.user
 *.log
+
+bin/*.exp
+bin/*.ilk
+bin/*.pdb
+bin/*.lib
