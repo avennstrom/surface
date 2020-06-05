@@ -11,11 +11,11 @@
 #include <mpmc_bounded_queue.hpp>
 #include <tracy/Tracy.hpp>
 
-#include <BulletDynamics/Dynamics/btDiscreteDynamicsWorld.h>
-#include <BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.h>
-#include <BulletCollision/BroadphaseCollision/btBroadphaseInterface.h>
-#include <BulletCollision/CollisionDispatch/btDefaultCollisionConfiguration.h>
-#include <BulletCollision/CollisionDispatch/btCollisionDispatcher.h>
+//#include <BulletDynamics/Dynamics/btDiscreteDynamicsWorld.h>
+//#include <BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.h>
+//#include <BulletCollision/BroadphaseCollision/btBroadphaseInterface.h>
+//#include <BulletCollision/CollisionDispatch/btDefaultCollisionConfiguration.h>
+//#include <BulletCollision/CollisionDispatch/btCollisionDispatcher.h>
 
 #include <vulkan/vulkan.h>
 

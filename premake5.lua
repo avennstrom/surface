@@ -16,10 +16,6 @@ project "surface"
 	links {
 		"noise",
 		"vulkan-1",
-
-		"BulletCollision_vs2010_x64_release",
-		"BulletDynamics_vs2010_x64_release",
-		"Bullet3Common_vs2010_x64_release",
 	}
 
 	files {
@@ -37,16 +33,14 @@ project "surface"
 	local vulkanSdkPath = os.getenv('VK_SDK_PATH')
 
 	includedirs {
-		"src/",
-		"extlib/libnoise/include/",
+		"src",
+		"extlib/libnoise/include",
+		"extlib/glm",
 		vulkanSdkPath .. "/Include",
-		"%{cfg.projectdir}/../glm",
-		"%{cfg.projectdir}/../bullet3/src",
 	}
 
 	libdirs {
 		vulkanSdkPath .. "/Lib",
-		"%{cfg.projectdir}/../bullet3/bin",
 	}
 
 	defines {
