@@ -108,7 +108,7 @@ void DebugRenderer::draw(VkCommandBuffer cb)
 		{
 			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, m_debugPipelineLayout, 0, 1, &descriptorSets[i], 0, nullptr);
 			vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, m_debugPipeline[i]);
-			//vkCmdDraw(cb, count, 1, offset, 0);
+			vkCmdDraw(cb, count, 1, offset, 0);
 		}
 	}
 
@@ -346,14 +346,14 @@ void DebugRenderer::_createDebugPipeline()
 		VkViewport viewport{};
 		viewport.x = 0.0f;
 		viewport.y = 0.0f;
-		viewport.width = (float)graphics::resolution.width;
-		viewport.height = (float)graphics::resolution.height;
+		viewport.width = (float)graphics::resolution.width / 2;
+		viewport.height = (float)graphics::resolution.height / 2;
 		viewport.minDepth = 0.0f;
 		viewport.maxDepth = 1.0f;
 
 		VkRect2D scissor{};
 		scissor.offset = { 0, 0 };
-		scissor.extent = graphics::resolution;
+		scissor.extent = { graphics::resolution.width / 2, graphics::resolution.height / 2 };
 
 		VkPipelineViewportStateCreateInfo viewportState{};
 		viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
