@@ -18,7 +18,8 @@ Project files are generated using Premake 5. Binaries are included in the repo r
 
 Open `surface.sln` and build.
 
-### Tracy
+## Tracy
 
-Debug and Release versions are built with [Tracy](https://github.com/wolfpld/tracy) enabled. A pre-built version of the Tracy server is located in `/utils/Tracy.exe`.
+Debug and Release versions are built with [Tracy](https://github.com/wolfpld/tracy) enabled. A pre-built version of the Tracy server is located in `/utils/Tracy.exe`. 
 
+![tracy screenshot](https://raw.githubusercontent.com/avennstrom/surface/master/tracy.png)
