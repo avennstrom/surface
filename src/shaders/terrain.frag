@@ -12,7 +12,7 @@ layout(location = 0) out vec3 out_Color;
 void main()
 {
 	float fogRangeInv = 1.0 / (u_fogEnd - u_fogStart);
-	float fogAmount = saturate((in_DistanceToEye - u_fogStart) * fogRangeInv);
+	float fogAmount = sqrt(saturate((in_DistanceToEye - u_fogStart) * fogRangeInv));
 	vec3 color = lerp(in_Color, u_fogColor, fogAmount);
 	out_Color = color;
 }

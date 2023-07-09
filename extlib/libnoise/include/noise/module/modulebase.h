@@ -23,6 +23,9 @@
 #ifndef NOISE_MODULEBASE_H
 #define NOISE_MODULEBASE_H
 
+#pragma warning(push)
+#pragma warning(disable: 4100)
+
 #include <stdlib.h>
 #include <assert.h>
 #include <math.h>
@@ -348,7 +351,7 @@ namespace noise
         /// This restriction is necessary because if this object was copied,
         /// all source modules assigned to this noise module would need to be
         /// copied as well.
-        const Module& operator= (const Module&)
+        const Module& operator= (const Module& m)
         {
           return *this;
         }
@@ -362,5 +365,7 @@ namespace noise
   }
 
 }
+
+#pragma warning(pop)
 
 #endif

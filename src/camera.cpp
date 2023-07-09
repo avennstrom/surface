@@ -11,16 +11,16 @@
 
 using namespace DirectX;
 
-constexpr float MovementSpeed = 60.0f;
+constexpr float MovementSpeed = 20.0f;
 constexpr float LookSensitivity = 5.0f;
 
 Camera::Camera()
 	: m_position(0.0f, 0.0f, 0.0f)
 	, m_yaw(0.0f)
 	, m_pitch(0.0f)
-	, m_fovInDegrees(90.0f)
+	, m_fovInDegrees(75.0f)
 	, m_nearClip(0.1f)
-	, m_farClip(512.0f)
+	, m_farClip(128.0f)
 	, m_worldMatrix(1.0f)
 	, m_worldToViewMatrix(1.0f)
 	, m_viewToNDCMatrix(1.0f)

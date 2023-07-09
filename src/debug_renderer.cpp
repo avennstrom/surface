@@ -202,6 +202,8 @@ void DebugRenderer::_createDebugDescriptorSetLayout()
 	if (vkCreateDescriptorSetLayout(graphics::device, &descriptorCreateInfo, nullptr, &m_debugDescriptorSetLayout) != VK_SUCCESS) {
 		throw new std::runtime_error("failed to create descriptor set layout!");
 	}
+
+	graphics::setObjectDebugName(m_debugDescriptorSetLayout, "Debug");
 }
 
 void DebugRenderer::_createDebugDescriptorSet(VkDescriptorPool descriptorPool)
@@ -278,6 +280,8 @@ void DebugRenderer::_createDebugPipeline()
 		throw std::runtime_error("failed to create pipeline layout!");
 	}
 
+	graphics::setObjectDebugName(m_debugPipelineLayout, "Debug");
+
 	auto vertShaderCode = readFile("shaders/debug_vs");
 	auto fragShaderCode = readFile("shaders/debug_ps");
 
@@ -338,22 +342,23 @@ void DebugRenderer::_createDebugPipeline()
 		vertexInputInfo.vertexAttributeDescriptionCount = 2;
 		vertexInputInfo.pVertexAttributeDescriptions = vertexAttributes;
 
-		VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-		inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-		inputAssembly.topology = topologies[i];
-		inputAssembly.primitiveRestartEnable = VK_FALSE;
+		const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+			.topology = topologies[i],
+		};
 
-		VkViewport viewport{};
-		viewport.x = 0.0f;
-		viewport.y = 0.0f;
-		viewport.width = (float)graphics::resolution.width / 2;
-		viewport.height = (float)graphics::resolution.height / 2;
-		viewport.minDepth = 0.0f;
-		viewport.maxDepth = 1.0f;
+		const VkViewport viewport{
+			.x = 0.0f,
+			.y = 0.0f,
+			.width = (float)graphics::resolution.width,
+			.height = (float)graphics::resolution.height,
+			.minDepth = 0.0f,
+			.maxDepth = 1.0f,
+		};
 
-		VkRect2D scissor{};
-		scissor.offset = { 0, 0 };
-		scissor.extent = { graphics::resolution.width / 2, graphics::resolution.height / 2 };
+		const VkRect2D scissor{
+			.extent = { graphics::resolution.width, graphics::resolution.height },
+		};
 
 		VkPipelineViewportStateCreateInfo viewportState{};
 		viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -372,14 +377,15 @@ void DebugRenderer::_createDebugPipeline()
 		rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
 		rasterizer.depthBiasEnable = VK_FALSE;
 
-		VkPipelineMultisampleStateCreateInfo multisampling{};
-		multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-		multisampling.sampleShadingEnable = VK_FALSE;
-		multisampling.rasterizationSamples = VK_SAMPLE_COUNT_2_BIT; //TODO
+		const VkPipelineMultisampleStateCreateInfo multisampling{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+			.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+		};
 
-		VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-		colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
-		colorBlendAttachment.blendEnable = VK_FALSE;
+		const VkPipelineColorBlendAttachmentState colorBlendAttachment{
+			.blendEnable = VK_FALSE,
+			.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT,
+		};
 
 		VkPipelineColorBlendStateCreateInfo colorBlending{};
 		colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -392,17 +398,26 @@ void DebugRenderer::_createDebugPipeline()
 		colorBlending.blendConstants[2] = 0.0f;
 		colorBlending.blendConstants[3] = 0.0f;
 
-		VkPipelineDepthStencilStateCreateInfo depthStencilState{};
-		depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-		depthStencilState.stencilTestEnable = VK_FALSE;
-		depthStencilState.depthTestEnable = depthTestEnable[i];
-		depthStencilState.depthWriteEnable = VK_FALSE;
-		depthStencilState.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-		depthStencilState.minDepthBounds = 0.0f;
-		depthStencilState.maxDepthBounds = 1.0f;
+		const VkPipelineDepthStencilStateCreateInfo depthStencilState{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+			.depthTestEnable = depthTestEnable[i],
+			.depthWriteEnable = VK_FALSE,
+			.depthCompareOp = VK_COMPARE_OP_ALWAYS,
+			.stencilTestEnable = VK_FALSE,
+			.minDepthBounds = 0.0f,
+			.maxDepthBounds = 1.0f,
+		};
+
+		const VkFormat colorFormats[] = { VK_FORMAT_B8G8R8A8_UNORM };
+		const VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+			.colorAttachmentCount = _countof(colorFormats),
+			.pColorAttachmentFormats = colorFormats,
+		};
 
 		VkGraphicsPipelineCreateInfo pipelineInfo{};
 		pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+		pipelineInfo.pNext = &pipelineRenderingCreateInfo,
 		pipelineInfo.stageCount = 2;
 		pipelineInfo.pStages = shaderStages;
 		pipelineInfo.pVertexInputState = &vertexInputInfo;
@@ -413,13 +428,13 @@ void DebugRenderer::_createDebugPipeline()
 		pipelineInfo.pColorBlendState = &colorBlending;
 		pipelineInfo.pDepthStencilState = &depthStencilState;
 		pipelineInfo.layout = m_debugPipelineLayout;
-		pipelineInfo.renderPass = graphics::colorPass;
-		pipelineInfo.subpass = 0;
 		pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
 		if (vkCreateGraphicsPipelines(graphics::device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_debugPipeline[i]) != VK_SUCCESS) {
 			throw std::runtime_error("failed to create debug pipeline!");
 		}
+
+		graphics::setObjectDebugName(m_debugPipeline[i], "Debug");
 	}
 
 	vkDestroyShaderModule(graphics::device, fragShaderModule, nullptr);

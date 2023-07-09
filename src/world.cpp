@@ -1,7 +1,8 @@
 #include "world.hpp"
 
-#include <terrain.hpp>
-#include <error.hpp>
+#include "descriptor_set_writer.hpp"
+#include "terrain.hpp"
+#include "error.hpp"
 
 #include <DirectXMath.h>
 #include <DirectXPackedVector.h>
@@ -13,7 +14,7 @@
 #include <glm/mat4x4.hpp>
 #include <glm/ext/matrix_transform.hpp>
 
-//#include <BulletCollision/BroadphaseCollision/btDbvtBroadphase.h>
+#include <BulletCollision/BroadphaseCollision/btDbvtBroadphase.h>
 
 #include <Windows.h>
 
@@ -52,6 +53,40 @@ struct TerrainConstantBuffer
 	//
 	glm::vec3 u_fogColor;
 	float u_fogRangeInv;
+};
+
+struct CheckerboardResolveConstantBuffer
+{
+	uint32_t flags{ 0u };
+};
+
+class LinearPlacedBufferAllocator
+{
+public:
+	LinearPlacedBufferAllocator(VkBuffer buffer, VkDeviceSize size)
+		: m_buffer(buffer)
+		, m_size(size)
+		, m_offset( 0u )
+	{
+	}
+
+	template<class T>
+	VkDescriptorBufferInfo push(VkCommandBuffer cb, const T& data)
+	{
+		uint32_t alignment = 64u;
+
+		vkCmdUpdateBuffer(cb, m_buffer, m_offset, sizeof(T), &data);
+
+		const VkDescriptorBufferInfo bufferInfo{ m_buffer, m_offset, sizeof(T) };
+		m_offset += ( ( sizeof(T) + alignment - 1 ) / alignment ) * alignment;
+
+		return bufferInfo;
+	}
+
+private:
+	VkBuffer m_buffer;
+	VkDeviceSize m_size;
+	VkDeviceSize m_offset;
 };
 
 static size_t getCoreCount()
@@ -332,8 +367,17 @@ void World::_createChunkPipeline()
 	depthStencilState.minDepthBounds = 0.0f;
 	depthStencilState.maxDepthBounds = 1.0f;
 
+	const VkFormat colorFormats[] = { VK_FORMAT_B10G11R11_UFLOAT_PACK32 };
+	const VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+		.colorAttachmentCount = _countof(colorFormats),
+		.pColorAttachmentFormats = colorFormats,
+		.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT,
+	};
+
 	VkGraphicsPipelineCreateInfo pipelineInfo{};
 	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pipelineInfo.pNext = &pipelineRenderingCreateInfo;
 	pipelineInfo.stageCount = 2;
 	pipelineInfo.pStages = shaderStages;
 	pipelineInfo.pVertexInputState = &vertexInputInfo;
@@ -344,8 +388,6 @@ void World::_createChunkPipeline()
 	pipelineInfo.pColorBlendState = &colorBlending;
 	pipelineInfo.pDepthStencilState = &depthStencilState;
 	pipelineInfo.layout = m_chunkPipelineLayout;
-	pipelineInfo.renderPass = graphics::colorPass;
-	pipelineInfo.subpass = 0;
 	pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
 	if (vkCreateGraphicsPipelines(graphics::device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_chunkPipeline) != VK_SUCCESS) {
@@ -354,52 +396,6 @@ void World::_createChunkPipeline()
 
 	vkDestroyShaderModule(graphics::device, fragShaderModule, nullptr);
 	vkDestroyShaderModule(graphics::device, vertShaderModule, nullptr);
-}
-
-void World::_createDescriptorPool()
-{
-	VkDescriptorPoolSize poolSizes[] = {
-		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1024 },
-		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 },
-	};
-
-	VkDescriptorPoolCreateInfo createInfo{};
-	createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	createInfo.maxSets = 1024;
-	createInfo.poolSizeCount = _countof(poolSizes);
-	createInfo.pPoolSizes = poolSizes;
-
-	if (vkCreateDescriptorPool(graphics::device, &createInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
-		throw new std::runtime_error("failed to create descriptor pool!");
-	}
-}
-
-void World::_createDescriptorStuff()
-{
-	VkDescriptorSetLayoutBinding bindings[1]{};
-	bindings[0].binding = 0;
-	bindings[0].descriptorCount = 1;
-	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	VkDescriptorSetLayoutCreateInfo descriptorCreateInfo{};
-	descriptorCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	descriptorCreateInfo.bindingCount = 1;
-	descriptorCreateInfo.pBindings = bindings;
-
-	if (vkCreateDescriptorSetLayout(graphics::device, &descriptorCreateInfo, nullptr, &m_chunkDescriptorSetLayout) != VK_SUCCESS) {
-		throw new std::runtime_error("failed to create descriptor set layout!");
-	}
-
-	VkDescriptorSetAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-	allocInfo.descriptorPool = m_descriptorPool;
-	allocInfo.descriptorSetCount = 1;
-	allocInfo.pSetLayouts = &m_chunkDescriptorSetLayout;
-
-	if (vkAllocateDescriptorSets(graphics::device, &allocInfo, &m_chunkDescriptorSet) != VK_SUCCESS) {
-		throw new std::runtime_error("failed to allocate descriptor sets!");
-	}
 }
 
 void World::_createChunkAllocator()
@@ -419,43 +415,28 @@ void World::_createUniformBuffer()
 {
 	VkBufferCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	createInfo.size = sizeof(TerrainConstantBuffer);
+	createInfo.size = 64 * 1024;
 	createInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-	if (vkCreateBuffer(graphics::device, &createInfo, nullptr, &m_perFrameUniformBuffer) != VK_SUCCESS) {
+	if (vkCreateBuffer(graphics::device, &createInfo, nullptr, &m_uniformBuffer) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create uniform buffer!");
 	}
 
 	VkMemoryRequirements memoryRequirements;
-	vkGetBufferMemoryRequirements(graphics::device, m_perFrameUniformBuffer, &memoryRequirements);
+	vkGetBufferMemoryRequirements(graphics::device, m_uniformBuffer, &memoryRequirements);
 
 	VkMemoryAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 	allocInfo.allocationSize = memoryRequirements.size;
 	allocInfo.memoryTypeIndex = graphics::findMemoryType(memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-	if (vkAllocateMemory(graphics::device, &allocInfo, nullptr, &m_perFrameUniformBufferMemory) != VK_SUCCESS) {
+	if (vkAllocateMemory(graphics::device, &allocInfo, nullptr, &m_uniformBufferMemory) != VK_SUCCESS) {
 		throw std::runtime_error("failed to allocate uniform buffer memory!");
 	}
 
-	if (vkBindBufferMemory(graphics::device, m_perFrameUniformBuffer, m_perFrameUniformBufferMemory, 0) != VK_SUCCESS) {
+	if (vkBindBufferMemory(graphics::device, m_uniformBuffer, m_uniformBufferMemory, 0) != VK_SUCCESS) {
 		throw std::runtime_error("failed to bind uniform buffer memory!");
 	}
-
-	VkDescriptorBufferInfo writeBufferInfo;
-	writeBufferInfo.buffer = m_perFrameUniformBuffer;
-	writeBufferInfo.offset = 0;
-	writeBufferInfo.range = sizeof(TerrainConstantBuffer);
-
-	VkWriteDescriptorSet descriptorWrites[1]{};
-	descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrites[0].dstBinding = 0;
-	descriptorWrites[0].dstSet = m_chunkDescriptorSet;
-	descriptorWrites[0].descriptorCount = 1;
-	descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	descriptorWrites[0].pBufferInfo = &writeBufferInfo;
-
-	vkUpdateDescriptorSets(graphics::device, 1, descriptorWrites, 0, nullptr);
 }
 
 void World::_createStagingBuffer()
@@ -485,101 +466,10 @@ void World::_createStagingBuffer()
 		if (vkBindBufferMemory(graphics::device, m_chunkStagingBuffer[i], m_chunkStagingBufferMemory[i], 0) != VK_SUCCESS) {
 			throw std::runtime_error("failed to bind staging buffer memory!");
 		}
-	}
-}
 
-void World::_createResolveDescriptorSet()
-{
-	VkDescriptorSetLayoutBinding bindings[2]{};
-
-	bindings[0].binding = 0;
-	bindings[0].descriptorCount = 1;
-	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-	bindings[1].binding = 1;
-	bindings[1].descriptorCount = 1;
-	bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-	VkDescriptorSetLayoutCreateInfo descriptorCreateInfo{};
-	descriptorCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	descriptorCreateInfo.bindingCount = 2;
-	descriptorCreateInfo.pBindings = bindings;
-
-	if (vkCreateDescriptorSetLayout(graphics::device, &descriptorCreateInfo, nullptr, &m_resolveDescriptorSetLayout) != VK_SUCCESS) {
-		throw new std::runtime_error("failed to create descriptor set layout!");
-	}
-
-	for (int i = 0; i < 3; ++i) {
-		VkDescriptorSetAllocateInfo allocInfo{};
-		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-		allocInfo.descriptorPool = m_descriptorPool;
-		allocInfo.descriptorSetCount = 1;
-		allocInfo.pSetLayouts = &m_resolveDescriptorSetLayout;
-
-		if (vkAllocateDescriptorSets(graphics::device, &allocInfo, &m_resolveDescriptorSet[i]) != VK_SUCCESS) {
-			throw new std::runtime_error("failed to allocate descriptor sets!");
+		if (vkMapMemory(graphics::device, m_chunkStagingBufferMemory[i], 0ull, VK_WHOLE_SIZE, 0, &m_chunkStagingBufferData[i]) != VK_SUCCESS) {
+			throw std::runtime_error("failed to map chunk staging buffer!");
 		}
-
-		VkWriteDescriptorSet descriptorWrites[2]{};
-
-		// Input color
-		VkDescriptorImageInfo writeImageInfo0{};
-		writeImageInfo0.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		writeImageInfo0.imageView = graphics::mainColorImageView;
-		writeImageInfo0.sampler = m_pointSampler;
-
-		descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrites[0].dstBinding = 0;
-		descriptorWrites[0].dstSet = m_resolveDescriptorSet[i];
-		descriptorWrites[0].descriptorCount = 1;
-		descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		descriptorWrites[0].pImageInfo = &writeImageInfo0;
-
-		// Resolved color
-		VkDescriptorImageInfo writeImageInfo1{};
-		writeImageInfo1.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-		writeImageInfo1.imageView = graphics::swapChainImageView(i);
-
-		descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrites[1].dstBinding = 1;
-		descriptorWrites[1].dstSet = m_resolveDescriptorSet[i];
-		descriptorWrites[1].descriptorCount = 1;
-		descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		descriptorWrites[1].pImageInfo = &writeImageInfo1;
-
-		vkUpdateDescriptorSets(graphics::device, _countof(descriptorWrites), descriptorWrites, 0, nullptr);
-	}
-}
-
-void World::_createResolvePipeline()
-{
-	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = 1;
-	pipelineLayoutInfo.pSetLayouts = &m_resolveDescriptorSetLayout;
-
-	if (vkCreatePipelineLayout(graphics::device, &pipelineLayoutInfo, nullptr, &m_resolvePipelineLayout) != VK_SUCCESS) {
-		throw std::runtime_error("failed to create pipeline layout!");
-	}
-
-	auto compShaderCode = readFile("shaders/resolve_cs");
-	VkShaderModule compShaderModule = createShaderModule(compShaderCode);
-
-	VkPipelineShaderStageCreateInfo stageInfo{};
-	stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-	stageInfo.module = compShaderModule;
-	stageInfo.pName = "main";
-
-	VkComputePipelineCreateInfo pipelineCreateInfo{};
-	pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-	pipelineCreateInfo.layout = m_resolvePipelineLayout;
-	pipelineCreateInfo.stage = stageInfo;
-
-	if (vkCreateComputePipelines(graphics::device, nullptr, 1, &pipelineCreateInfo, nullptr, &m_resolvePipeline) != VK_SUCCESS) {
-		throw std::runtime_error("failed to create pipeline!");
 	}
 }
 
@@ -589,6 +479,8 @@ World::World()
 	, m_mainThreadWorkQueue(64 * 1024)
 	, m_prevCameraPosChunkSpace(INT32_MAX, INT32_MAX, INT32_MAX)
 	, m_frameIndex(0)
+	, m_temporalTargetIndex(0)
+	, m_isHistoryValid(false)
 	, m_chunkStagingBufferSize(4 * 1024 * 1024)
 	, m_chunks(*this)
 {
@@ -607,12 +499,13 @@ World::~World()
 	}
 
 	for (size_t i = 0; i < 5; ++i) {
+		vkUnmapMemory(graphics::device, m_chunkStagingBufferMemory[i]);
 		vkFreeMemory(graphics::device, m_chunkStagingBufferMemory[i], nullptr);
 		vkDestroyBuffer(graphics::device, m_chunkStagingBuffer[i], nullptr);
 	}
 
-	vkFreeMemory(graphics::device, m_perFrameUniformBufferMemory, nullptr);
-	vkDestroyBuffer(graphics::device, m_perFrameUniformBuffer, nullptr);
+	vkFreeMemory(graphics::device, m_uniformBufferMemory, nullptr);
+	vkDestroyBuffer(graphics::device, m_uniformBuffer, nullptr);
 
 	for (size_t i = 0; i < m_chunks.count(); ++i) {
 		auto&& vchunk = m_chunks.visuals[i];
@@ -625,31 +518,226 @@ World::~World()
 	vmaDestroyAllocator(m_chunkAllocator);
 
 	vkDestroyPipeline(graphics::device, m_chunkPipeline, nullptr);
-	vkDestroyPipelineLayout(graphics::device, m_chunkPipelineLayout, nullptr);
+	vkDestroyPipeline(graphics::device, m_resolvePipeline, nullptr);
 
-	vkFreeDescriptorSets(graphics::device, m_descriptorPool, 1, &m_chunkDescriptorSet);
+	vkDestroyPipelineLayout(graphics::device, m_chunkPipelineLayout, nullptr);
+	vkDestroyPipelineLayout(graphics::device, m_resolvePipelineLayout, nullptr);
+
 	vkDestroyDescriptorSetLayout(graphics::device, m_chunkDescriptorSetLayout, nullptr);
+	vkDestroyDescriptorSetLayout(graphics::device, m_resolveDescriptorSetLayout, nullptr);
 
 	vkDestroyDescriptorPool(graphics::device, m_descriptorPool, nullptr);
+	vkDestroyDescriptorPool(graphics::device, m_dynamicDescriptorPool, nullptr);
 }
 
 void World::init()
 {
-	//m_btBroadphase = new btDbvtBroadphase();
-	//
-	//m_btCollisionConfiguration = new btDefaultCollisionConfiguration();
-	//m_btDispatcher = new btCollisionDispatcher(m_btCollisionConfiguration);
-	//
-	//m_btSolver = new btSequentialImpulseConstraintSolver();
-	//
-	//m_btWorld = new btDiscreteDynamicsWorld(m_btDispatcher, m_btBroadphase, m_btSolver, m_btCollisionConfiguration);
-	//
-	//m_btWorld->setGravity(btVector3(0.0f, -9.8f, 0.0f));
+	m_btBroadphase = new btDbvtBroadphase();
+	
+	m_btCollisionConfiguration = new btDefaultCollisionConfiguration();
+	m_btDispatcher = new btCollisionDispatcher(m_btCollisionConfiguration);
+	
+	m_btSolver = new btSequentialImpulseConstraintSolver();
+	
+	m_btWorld = new btDiscreteDynamicsWorld(m_btDispatcher, m_btBroadphase, m_btSolver, m_btCollisionConfiguration);
+	
+	m_btWorld->setGravity(btVector3(0.0f, -9.8f, 0.0f));
+
+
 
 	_createSamplers();
 
-	_createDescriptorPool();
-	_createDescriptorStuff();
+	// Descriptor pool
+	{
+		VkDescriptorPoolSize poolSizes[] = {
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1024 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024 },
+			{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024 },
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 },
+		};
+
+		VkDescriptorPoolCreateInfo createInfo{};
+		createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		createInfo.maxSets = 1024;
+		createInfo.poolSizeCount = _countof(poolSizes);
+		createInfo.pPoolSizes = poolSizes;
+
+		if (vkCreateDescriptorPool(graphics::device, &createInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
+			throw new std::runtime_error("failed to create descriptor pool!");
+		}
+	}
+	// Dynamic descriptor pool
+	{
+		VkDescriptorPoolSize poolSizes[] = {
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1024 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024 },
+			{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024 },
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 },
+		};
+
+		VkDescriptorPoolCreateInfo createInfo{};
+		createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		createInfo.maxSets = 1024;
+		createInfo.poolSizeCount = _countof(poolSizes);
+		createInfo.pPoolSizes = poolSizes;
+		createInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+
+		if (vkCreateDescriptorPool(graphics::device, &createInfo, nullptr, &m_dynamicDescriptorPool) != VK_SUCCESS) {
+			throw new std::runtime_error("failed to create descriptor pool!");
+		}
+	}
+
+	// Chunk rendering descriptor set layout
+	{
+		const VkDescriptorSetLayoutBinding bindings[] = 
+		{
+			{
+				.binding = 0,
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+			}
+		};
+
+		VkDescriptorSetLayoutCreateInfo descriptorCreateInfo{};
+		descriptorCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		descriptorCreateInfo.bindingCount = 1;
+		descriptorCreateInfo.pBindings = bindings;
+
+		if (vkCreateDescriptorSetLayout(graphics::device, &descriptorCreateInfo, nullptr, &m_chunkDescriptorSetLayout) != VK_SUCCESS) {
+			throw new std::runtime_error("failed to create descriptor set layout!");
+		}
+	}
+
+	// Checkerboard resolve pipeline
+	{
+		const VkDescriptorSetLayoutBinding bindings[] = 
+		{
+			{
+				.binding = 0,
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			},
+			{
+				.binding = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			},
+			{
+				.binding = 2,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			},
+			{
+				.binding = 3,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			},
+		};
+
+		VkDescriptorSetLayoutCreateInfo descriptorCreateInfo{};
+		descriptorCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		descriptorCreateInfo.bindingCount = _countof(bindings);
+		descriptorCreateInfo.pBindings = bindings;
+		if (vkCreateDescriptorSetLayout(graphics::device, &descriptorCreateInfo, nullptr, &m_resolveDescriptorSetLayout) != VK_SUCCESS) {
+			throw new std::runtime_error("failed to create descriptor set layout!");
+		}
+
+		VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		pipelineLayoutInfo.setLayoutCount = 1;
+		pipelineLayoutInfo.pSetLayouts = &m_resolveDescriptorSetLayout;
+
+		if (vkCreatePipelineLayout(graphics::device, &pipelineLayoutInfo, nullptr, &m_resolvePipelineLayout) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create pipeline layout!");
+		}
+
+		auto compShaderCode = readFile("shaders/resolve_cs");
+		VkShaderModule compShaderModule = createShaderModule(compShaderCode);
+
+		VkPipelineShaderStageCreateInfo stageInfo{};
+		stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		stageInfo.module = compShaderModule;
+		stageInfo.pName = "main";
+
+		VkComputePipelineCreateInfo pipelineCreateInfo{};
+		pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		pipelineCreateInfo.layout = m_resolvePipelineLayout;
+		pipelineCreateInfo.stage = stageInfo;
+
+		if (vkCreateComputePipelines(graphics::device, nullptr, 1, &pipelineCreateInfo, nullptr, &m_resolvePipeline) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create pipeline!");
+		}
+
+		graphics::setObjectDebugName(m_resolveDescriptorSetLayout, "CB_Resolve");
+		graphics::setObjectDebugName(m_resolvePipelineLayout, "CB_Resolve");
+		graphics::setObjectDebugName(m_resolvePipeline, "CB_Resolve");
+	}
+
+	// Composite descriptor set layout
+	{
+		const VkDescriptorSetLayoutBinding bindings[] = 
+		{
+			{
+				.binding = 0,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			},
+			{
+				.binding = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			},
+		};
+
+		VkDescriptorSetLayoutCreateInfo descriptorCreateInfo{};
+		descriptorCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		descriptorCreateInfo.bindingCount = _countof(bindings);
+		descriptorCreateInfo.pBindings = bindings;
+		if (vkCreateDescriptorSetLayout(graphics::device, &descriptorCreateInfo, nullptr, &m_compositeDescriptorSetLayout) != VK_SUCCESS) {
+			throw new std::runtime_error("failed to create descriptor set layout!");
+		}
+
+		VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		pipelineLayoutInfo.setLayoutCount = 1;
+		pipelineLayoutInfo.pSetLayouts = &m_compositeDescriptorSetLayout;
+
+		if (vkCreatePipelineLayout(graphics::device, &pipelineLayoutInfo, nullptr, &m_compositePipelineLayout) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create pipeline layout!");
+		}
+
+		auto compShaderCode = readFile("shaders/composite_cs");
+		VkShaderModule compShaderModule = createShaderModule(compShaderCode);
+
+		VkPipelineShaderStageCreateInfo stageInfo{};
+		stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		stageInfo.module = compShaderModule;
+		stageInfo.pName = "main";
+
+		VkComputePipelineCreateInfo pipelineCreateInfo{};
+		pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		pipelineCreateInfo.layout = m_compositePipelineLayout;
+		pipelineCreateInfo.stage = stageInfo;
+
+		if (vkCreateComputePipelines(graphics::device, nullptr, 1, &pipelineCreateInfo, nullptr, &m_compositePipeline) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create pipeline!");
+		}
+
+		graphics::setObjectDebugName(m_compositeDescriptorSetLayout, "Composite");
+		graphics::setObjectDebugName(m_compositePipelineLayout, "Composite");
+		graphics::setObjectDebugName(m_compositePipeline, "Composite");
+	}
 
 	_createChunkPipeline();
 
@@ -658,8 +746,126 @@ void World::init()
 
 	_createUniformBuffer();
 
-	_createResolveDescriptorSet();
-	_createResolvePipeline();
+	m_resolution				= graphics::resolution;
+	m_checkerboardResolution	= { m_resolution.width / 2, m_resolution.height / 2 };
+
+	// Checkerboard depth
+	{
+		VkImageCreateInfo imageInfo{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.imageType = VK_IMAGE_TYPE_2D,
+			.format = VK_FORMAT_D32_SFLOAT,
+			.extent = { m_checkerboardResolution.width, m_checkerboardResolution.height, 1 },
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.samples = VK_SAMPLE_COUNT_2_BIT,
+			.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		};
+
+        if (vkCreateImage(graphics::device, &imageInfo, nullptr, &m_checkerboardDepth) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create image!");
+        }
+
+        graphics::allocateAndBindDedicatedImageMemory(m_checkerboardDepth, &m_checkerboardDepthMemory);
+
+		const VkImageViewCreateInfo viewInfo{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = m_checkerboardDepth,
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = imageInfo.format,
+			.subresourceRange = {
+				.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+				.levelCount = 1,
+				.layerCount = 1,
+			},
+		};
+
+        if (vkCreateImageView(graphics::device, &viewInfo, nullptr, &m_checkerboardDepthView)) {
+            throw std::runtime_error("failed to create image view!");
+        }
+
+		graphics::setObjectDebugName(m_checkerboardDepth, "CB_Depth");
+		graphics::setObjectDebugName(m_checkerboardDepthView, "CB_Depth");
+	}
+
+	// Checkerboard color
+    {
+        const VkImageCreateInfo imageInfo{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.imageType = VK_IMAGE_TYPE_2D,
+			.format = VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+			.extent = { m_checkerboardResolution.width, m_checkerboardResolution.height, 1 },
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.samples = VK_SAMPLE_COUNT_2_BIT,
+			.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		};
+
+        if (vkCreateImage(graphics::device, &imageInfo, nullptr, &m_checkerboardColor) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create image!");
+        }
+
+        graphics::allocateAndBindDedicatedImageMemory(m_checkerboardColor, &m_checkerboardColorMemory);
+
+        const VkImageViewCreateInfo viewInfo{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = m_checkerboardColor,
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = imageInfo.format,
+			.subresourceRange = {
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.levelCount = 1,
+				.layerCount = 1,
+			},
+		};
+
+        if (vkCreateImageView(graphics::device, &viewInfo, nullptr, &m_checkerboardColorView)) {
+            throw std::runtime_error("failed to create image view!");
+        }
+
+		graphics::setObjectDebugName(m_checkerboardColor, "CB_Color");
+		graphics::setObjectDebugName(m_checkerboardColorView, "CB_Color");
+    }
+    // Resolved color
+	for (size_t i = 0; i < 2; ++i)
+    {
+		const VkImageCreateInfo imageInfo{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.imageType = VK_IMAGE_TYPE_2D,
+			.format = VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+			.extent = { m_resolution.width, m_resolution.height, 1 },
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		};
+
+        if (vkCreateImage(graphics::device, &imageInfo, nullptr, &m_resolvedColor[i]) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create image!");
+        }
+
+        graphics::allocateAndBindDedicatedImageMemory(m_resolvedColor[i], &m_resolvedColorMemory[i]);
+
+        const VkImageViewCreateInfo viewInfo{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = m_resolvedColor[i],
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = imageInfo.format,
+			.subresourceRange = {
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.levelCount = 1,
+				.layerCount = 1,
+			},
+		};
+
+        if (vkCreateImageView(graphics::device, &viewInfo, nullptr, &m_resolvedColorView[i])) {
+            throw std::runtime_error("failed to create image view!");
+        }
+
+		const std::string name = "Resolved_Color_" + std::to_string(i);
+		graphics::setObjectDebugName(m_resolvedColor[i], name);
+		graphics::setObjectDebugName(m_resolvedColorView[i], name);
+    }
 
 	m_debugRenderer.reset(new DebugRenderer(m_descriptorPool));
 
@@ -733,6 +939,8 @@ void World::update(float dt, Input& input)
 					const glm::vec3* chunkNormalBuffer = work.chunkLoaded.chunkNormalBuffer;
 					const VisualChunk& vchunk = work.chunkLoaded.visualChunk;
 
+					assert(vchunk.vertexCount == vertexCount);
+
 					if (vchunk.vertexCount > 0) {
 						const size_t positionDataSize = vertexCount * sizeof(glm::vec3);
 						const size_t normalDataSize = vertexCount * sizeof(glm::vec3);
@@ -746,15 +954,10 @@ void World::update(float dt, Input& input)
 							break;
 						}
 
-						void* mappedMemory;
-						if (vkMapMemory(graphics::device, m_chunkStagingBufferMemory[m_frameIndex], chunkStagingBufferOffset, totalDataSize, 0, &mappedMemory) != VK_SUCCESS) {
-							throw std::runtime_error("failed to map chunk staging buffer!");
-						}
+						uint8_t* mappedMemory = ((uint8_t*)m_chunkStagingBufferData[m_frameIndex]) + chunkStagingBufferOffset;
 
-						memcpy(((char*)mappedMemory) + vertexDataOffset, chunkPositionBuffer, positionDataSize);
-						memcpy(((char*)mappedMemory) + normalDataOffset, chunkNormalBuffer, normalDataSize);
-
-						vkUnmapMemory(graphics::device, m_chunkStagingBufferMemory[m_frameIndex]);
+						memcpy(mappedMemory + vertexDataOffset, chunkPositionBuffer, positionDataSize);
+						memcpy(mappedMemory + normalDataOffset, chunkNormalBuffer, normalDataSize);
 
 						StagingCopy copy{};
 
@@ -993,21 +1196,39 @@ void World::draw()
 		}
 	}
 
-	{
-		ZoneScopedN("Update Chunk Uniform Buffer");
+	VkDescriptorBufferInfo terrainUniformBuffer{};
+	VkDescriptorBufferInfo checkerboardResolveUniformBuffer{};
 
-		TerrainConstantBuffer constants;
-		constants.u_fogStart = 32.0f;
-		constants.u_fogEnd = m_camera.getFarClip();
-		constants.u_fogRangeInv = 1.0f / (constants.u_fogEnd - constants.u_fogStart);
-		constants.u_fogColor.x = 0.0f;
-		constants.u_fogColor.y = 0.0f;
-		constants.u_fogColor.z = 0.0f;
-		constants.u_localToNDCMatrix = m_camera.getWorldToNDCMatrix();
-		constants.u_eyePos = m_camera.getPosition();
-		constants.u_lightDir = glm::normalize(glm::vec3(0.2f, 1.0f, 0.1f));
-		vkCmdUpdateBuffer(cb, m_perFrameUniformBuffer, 0, sizeof(TerrainConstantBuffer), &constants);
+	{
+		ZoneScopedN("Upload uniforms");
+
+		LinearPlacedBufferAllocator uniformAllocator(m_uniformBuffer, m_uniformBufferSize);
+
+		{
+			TerrainConstantBuffer uniforms{};
+			uniforms.u_fogStart = 32.0f;
+			uniforms.u_fogEnd = m_camera.getFarClip();
+			uniforms.u_fogRangeInv = 1.0f / (uniforms.u_fogEnd - uniforms.u_fogStart);
+			uniforms.u_fogColor.x = 0.0f;
+			uniforms.u_fogColor.y = 0.0f;
+			uniforms.u_fogColor.z = 0.0f;
+			uniforms.u_localToNDCMatrix = m_camera.getWorldToNDCMatrix();
+			uniforms.u_eyePos = m_camera.getPosition();
+			uniforms.u_lightDir = glm::normalize(glm::vec3(0.2f, 1.0f, 0.1f));
+			terrainUniformBuffer = uniformAllocator.push(cb, uniforms);
+		}
+		{
+			CheckerboardResolveConstantBuffer uniforms{};
+			if (m_isHistoryValid)
+			{
+				uniforms.flags |= 1u;
+			}
+			checkerboardResolveUniformBuffer = uniformAllocator.push(cb, uniforms);
+		}
 	}
+
+	assert(terrainUniformBuffer.buffer != VK_NULL_HANDLE);
+	assert(checkerboardResolveUniformBuffer.buffer != VK_NULL_HANDLE);
 
 #if 0
 	// Draw chunk boundaries
@@ -1046,42 +1267,89 @@ void World::draw()
 
 	m_debugRenderer->updateBuffers(cb, m_camera);
 
-	VkRenderPassBeginInfo renderPassInfo{};
-	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	renderPassInfo.renderPass = graphics::colorPass;
-	renderPassInfo.framebuffer = graphics::colorPassFramebuffer;
-	renderPassInfo.renderArea.offset = { 0, 0 };
-	renderPassInfo.renderArea.extent = { graphics::resolution.width / 2, graphics::resolution.height / 2 };
+	// Barriers
+	{
+		const VkImageMemoryBarrier imageBarriers[] = {
+			{	// Checkerboard color -> write color
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = 0,
+				.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+				.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				.image = m_checkerboardColor,
+				.subresourceRange = {
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.levelCount = 1,
+					.layerCount = 1,
+				},
+			},
+			{	// Checkerboard depth -> write depth
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = 0,
+				.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+				.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+				.image = m_checkerboardDepth,
+				.subresourceRange = {
+					.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+					.levelCount = 1,
+					.layerCount = 1,
+				},
+			},
+		};
 
-	VkClearValue depthClearValue{};
-	depthClearValue.depthStencil.depth = 1.0f;
-	depthClearValue.depthStencil.stencil = 0x00;
+		const VkMemoryBarrier memoryBarrier{
+			.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+			.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT,
+		};
 
-	VkClearValue colorClearValue{};
-	colorClearValue.color.float32[0] = 0.0f;
-	colorClearValue.color.float32[1] = 0.0f;
-	colorClearValue.color.float32[2] = 0.0f;
-	colorClearValue.color.float32[3] = 0.0f;
-
-	VkClearValue clearValues[] = {
-		depthClearValue,
-		colorClearValue,
-	};
-
-	renderPassInfo.clearValueCount = _countof(clearValues);
-	renderPassInfo.pClearValues = clearValues;
-
-	vkCmdBeginRenderPass(cb, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+		vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 1, &memoryBarrier, 0, nullptr, _countof(imageBarriers), imageBarriers);
+	}
 
 	{
 		ZoneScopedN("Draw Chunks");
 
-		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, m_chunkPipeline);
-
-		VkDescriptorSet descriptorSets[] = {
-			m_chunkDescriptorSet,
+		const VkRenderingAttachmentInfo depthAttachment{
+			.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+			.imageView = m_checkerboardDepthView,
+			.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.clearValue = { .depthStencil = { .depth = 1.0f } },
 		};
 
+		const VkRenderingAttachmentInfo colorAttachments[] = {
+			{
+				.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+				.imageView = m_checkerboardColorView,
+				.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+				.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+				.clearValue = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } } },
+			}
+		};
+
+		const VkRenderingInfo renderingInfo{
+			.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+			.renderArea = { .extent = m_checkerboardResolution },
+			.layerCount = 1,
+			.colorAttachmentCount = _countof(colorAttachments),
+			.pColorAttachments = colorAttachments,
+			.pDepthAttachment = &depthAttachment,
+		};
+
+		vkCmdBeginRendering(cb, &renderingInfo);
+
+		const VkDescriptorSet descriptorSet = allocateDescriptorSet("Chunks", m_descriptorSetCache, m_dynamicDescriptorPool, m_chunkDescriptorSetLayout, graphics::currentFrameId());
+		{
+			DescriptorWriter writer( graphics::device, 4 );
+			writer.bindUniformBuffer(descriptorSet, 0, terrainUniformBuffer);
+		}
+
+		const VkDescriptorSet descriptorSets[] = { descriptorSet };
+
+		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, m_chunkPipeline);
 		vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, m_chunkPipelineLayout, 0, 1, descriptorSets, 0, nullptr);
 
 		for (size_t chunkIt = 0; chunkIt < m_chunks.count(); ++chunkIt)
@@ -1109,84 +1377,240 @@ void World::draw()
 				}
 			}
 		}
+
+		vkCmdEndRendering(cb);
 	}
 
-	m_debugRenderer->draw(cb);
-
-	vkCmdEndRenderPass(cb);
-
+	// Barriers
 	{
-		VkImageMemoryBarrier resolveImageBarrier{};
-		resolveImageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-		resolveImageBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		resolveImageBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-		resolveImageBarrier.srcAccessMask = 0;
-		resolveImageBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		resolveImageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		resolveImageBarrier.subresourceRange.layerCount = 1;
-		resolveImageBarrier.subresourceRange.levelCount = 1;
-		resolveImageBarrier.image = graphics::currentSwapChainImage();
+		std::vector<VkImageMemoryBarrier> imageBarriers = {
+			{	// Checkerboard color -> read
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				.image = m_checkerboardColor,
+				.subresourceRange = {
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.levelCount = 1,
+					.layerCount = 1,
+				},
+			},
+			{	// Checkerboard depth -> read
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+				.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				.image = m_checkerboardDepth,
+				.subresourceRange = {
+					.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+					.levelCount = 1,
+					.layerCount = 1,
+				},
+			},
+			{	// Resolve target -> write
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = VK_ACCESS_NONE,
+				.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+				.newLayout = VK_IMAGE_LAYOUT_GENERAL,
+				.image = m_resolvedColor[m_temporalTargetIndex],
+				.subresourceRange = {
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.levelCount = 1,
+					.layerCount = 1,
+				},
+			},
+		};
 
-		vkCmdPipelineBarrier(
-			cb,
-			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-			VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
-			0,
-			0,
-			nullptr,
-			0,
-			nullptr,
-			1,
-			&resolveImageBarrier);
+		VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+
+		//if( m_isHistoryValid )
+		//{
+		//	srcStageMask |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+		//	imageBarriers.push_back(VkImageMemoryBarrier{
+		//		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+		//		.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+		//		.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+		//		.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+		//		.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		//		.image = m_resolvedColor[1u - m_temporalTargetIndex],
+		//		.subresourceRange = {
+		//			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+		//			.levelCount = 1,
+		//			.layerCount = 1,
+		//		},
+		//	});
+		//}
+
+		vkCmdPipelineBarrier(cb, srcStageMask, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, (uint32_t)imageBarriers.size(), imageBarriers.data());
 	}
 
-	vkCmdBindDescriptorSets(
-		cb,
-		VK_PIPELINE_BIND_POINT_COMPUTE,
-		m_resolvePipelineLayout,
-		0,
-		1,
-		&m_resolveDescriptorSet[graphics::currentFrameIndex()],
-		0,
-		nullptr);
-	vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_resolvePipeline);
-
-	const uint32_t threadGroupSizeX = 8;
-	const uint32_t threadGroupSizeY = 8;
-
-	const uint32_t threadCountX = ((graphics::resolution.width / 2) + (threadGroupSizeX - 1)) / threadGroupSizeX;
-	const uint32_t threadCountY = (graphics::resolution.height + (threadGroupSizeY - 1)) / threadGroupSizeY;
-
-	vkCmdDispatch(cb, threadCountX, threadCountY, 1);
-
+	// Checkerboard resolve
 	{
-		VkImageMemoryBarrier imageBarrier{};
-		imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-		imageBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-		imageBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-		imageBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		imageBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-		imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		imageBarrier.subresourceRange.layerCount = 1;
-		imageBarrier.subresourceRange.levelCount = 1;
-		imageBarrier.image = graphics::currentSwapChainImage();
+		VkDescriptorSet descriptorSet = allocateDescriptorSet("CheckerboardResolve", m_descriptorSetCache, m_dynamicDescriptorPool, m_resolveDescriptorSetLayout, graphics::currentFrameId());
+		{
+			DescriptorWriter writer( graphics::device, 8 );
+			writer.bindUniformBuffer(descriptorSet, 0, checkerboardResolveUniformBuffer);
+			writer.bindCombinedImageSampler(descriptorSet, 1, m_pointSampler, m_checkerboardColorView);
+			if(m_isHistoryValid)
+			{
+				writer.bindCombinedImageSampler(descriptorSet, 2, m_pointSampler, m_resolvedColorView[1 - m_temporalTargetIndex]);
+			}
+			writer.bindStorageImage(descriptorSet, 3, m_resolvedColorView[m_temporalTargetIndex]);
+			//writer.bindStorageImage(descriptorSet, 2, graphics::swapChainImageView(graphics::currentSwapChainImageIndex()));
+		}
 
-		vkCmdPipelineBarrier(
-			cb,
-			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-			VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
-			0,
-			0,
-			nullptr,
-			0,
-			nullptr,
-			1,
-			&imageBarrier);
+		const uint32_t threadGroupSizeX = 8;
+		const uint32_t threadGroupSizeY = 8;
+
+		const uint32_t threadCountX = ((graphics::resolution.width / 2) + (threadGroupSizeX - 1)) / threadGroupSizeX;
+		const uint32_t threadCountY = (graphics::resolution.height + (threadGroupSizeY - 1)) / threadGroupSizeY;
+
+		vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_resolvePipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_resolvePipeline);
+		vkCmdDispatch(cb, threadCountX, threadCountY, 1);
 	}
 
-	//vkCmdEndRenderPass(cb);
+	// Barriers
+	{
+		const VkImageMemoryBarrier imageBarriers[] = {
+			{	// Checkerboard resolve -> read
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+				.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				.image = m_resolvedColor[m_temporalTargetIndex],
+				.subresourceRange = {
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.levelCount = 1,
+					.layerCount = 1,
+				},
+			},
+			{	// Backbuffer -> write
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = 0,
+				.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+				.newLayout = VK_IMAGE_LAYOUT_GENERAL,
+				.image = graphics::currentSwapChainImage(),
+				.subresourceRange = {
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.levelCount = 1,
+					.layerCount = 1,
+				},
+			},
+		};
+
+		vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, _countof(imageBarriers), imageBarriers);
+	}
+
+	// Composite
+	{
+		VkDescriptorSet descriptorSet = allocateDescriptorSet("Composite", m_descriptorSetCache, m_dynamicDescriptorPool, m_compositeDescriptorSetLayout, graphics::currentFrameId());
+		{
+			DescriptorWriter writer( graphics::device, 2 );
+			writer.bindCombinedImageSampler(descriptorSet, 0, m_pointSampler, m_resolvedColorView[m_temporalTargetIndex]);
+			writer.bindStorageImage(descriptorSet, 1, graphics::currentSwapChainImageView());
+		}
+
+		const uint32_t threadGroupSizeX = 8;
+		const uint32_t threadGroupSizeY = 8;
+
+		const uint32_t threadCountX = (graphics::resolution.width + (threadGroupSizeX - 1)) / threadGroupSizeX;
+		const uint32_t threadCountY = (graphics::resolution.height + (threadGroupSizeY - 1)) / threadGroupSizeY;
+
+		vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_compositePipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_compositePipeline);
+		vkCmdDispatch(cb, threadCountX, threadCountY, 1);
+	}
+
+	// Barriers
+	{
+		const VkImageMemoryBarrier imageBarriers[] = {
+			{	// Backbuffer -> color write
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+				.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				.image = graphics::currentSwapChainImage(),
+				.subresourceRange = {
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.levelCount = 1,
+					.layerCount = 1,
+				},
+			},
+		};
+
+		vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, _countof(imageBarriers), imageBarriers);
+	}
+
+	// Debug rendering
+	{
+		//const VkRenderingAttachmentInfo depthAttachment{
+		//	.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+		//	.imageView = m_checkerboardDepthView,
+		//	.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+		//	.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+		//	.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		//	.clearValue = { .depthStencil = { .depth = 1.0f } },
+		//};
+
+		const VkRenderingAttachmentInfo colorAttachments[] = {
+			{
+				.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+				.imageView = graphics::currentSwapChainImageView(),
+				.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+				.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			}
+		};
+
+		const VkRenderingInfo renderingInfo{
+			.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+			.renderArea = { .extent = m_resolution },
+			.layerCount = 1,
+			.colorAttachmentCount = _countof(colorAttachments),
+			.pColorAttachments = colorAttachments,
+			//.pDepthAttachment = &depthAttachment,
+		};
+
+		vkCmdBeginRendering(cb, &renderingInfo);
+
+		m_debugRenderer->draw(cb);
+
+		vkCmdEndRendering(cb);
+	}
+
+	// Barriers
+	{
+		const VkImageMemoryBarrier imageBarriers[] = {
+			{	// Backbuffer -> present
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+				.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+				.image = graphics::currentSwapChainImage(),
+				.subresourceRange = {
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.levelCount = 1,
+					.layerCount = 1,
+				},
+			},
+		};
+
+		vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 0, nullptr, 0, nullptr, _countof(imageBarriers), imageBarriers);
+	}
 
 	m_frameIndex = (m_frameIndex + 1) % 5;
+	m_temporalTargetIndex = 1 - m_temporalTargetIndex;
+	m_isHistoryValid = true;
 
 	{
 		ZoneScopedN("Deferred Deletes");
@@ -1765,7 +2189,7 @@ void World::_initVisualChunk(
 			createInfo.size = vertexCount * sizeof(glm::vec3);
 
 			VmaAllocationCreateInfo allocInfo{};
-			allocInfo.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+			allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 			
 			if (vmaCreateBuffer(m_chunkAllocator, &createInfo, &allocInfo, &vchunk.vertexBuffer, &vchunk.vertexBufferAlloc, nullptr) != VK_SUCCESS) {
 				throw std::runtime_error("failed to create chunk vertex buffer!");
@@ -1778,7 +2202,7 @@ void World::_initVisualChunk(
 			createInfo.size = vertexCount * sizeof(glm::vec3);
 
 			VmaAllocationCreateInfo allocInfo{};
-			allocInfo.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+			allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
 			if (vmaCreateBuffer(m_chunkAllocator, &createInfo, &allocInfo, &vchunk.normalBuffer, &vchunk.normalBufferAlloc, nullptr) != VK_SUCCESS) {
 				throw std::runtime_error("failed to create chunk vertex buffer!");
@@ -1789,10 +2213,14 @@ void World::_initVisualChunk(
 
 void World::_freeChunkBuffers(VisualChunk& vchunk)
 {
-	vchunk.vertexCount = 0;
-
 	m_deferredDeletes[m_frameIndex].push_back(DeferredChunkBufferDelete{ vchunk.vertexBuffer, vchunk.vertexBufferAlloc });
 	m_deferredDeletes[m_frameIndex].push_back(DeferredChunkBufferDelete{ vchunk.normalBuffer, vchunk.normalBufferAlloc });
+
+	vchunk.vertexCount = 0;
+	vchunk.vertexBuffer = VK_NULL_HANDLE;
+	vchunk.vertexBufferAlloc = VK_NULL_HANDLE;
+	vchunk.normalBuffer = VK_NULL_HANDLE;
+	vchunk.normalBufferAlloc = VK_NULL_HANDLE;
 }
 
 void World::_debugDrawChunkAllocator()
@@ -1803,10 +2231,12 @@ void World::_debugDrawChunkAllocator()
 	const VkDeviceSize totalBytes = stats.total.usedBytes + stats.total.unusedBytes;
 	const float usedBytesRatio = static_cast<float>(stats.total.usedBytes) / static_cast<float>(totalBytes);
 
-	m_debugRenderer->drawRectangle2D(glm::vec2(0.0f, 0.0f), glm::vec2(1.0f, 16.0f / 720.0f), 0x222222);
-	m_debugRenderer->drawRectangle2D(glm::vec2(0.0f, 0.0f), glm::vec2(usedBytesRatio, 16.0f / 720.0f), 0x00aa00);
+	float w = (float)m_resolution.width;
 
-	m_debugRenderer->drawRectangle2D(glm::vec2(0.0f, 16.0f / 720.0f), glm::vec2(1.0f, 32.0f / 720.0f), 0x111111);
+	m_debugRenderer->drawRectangle2D(glm::vec2(0.0f, 0.0f), glm::vec2(1.0f, 16.0f / w), 0x222222);
+	m_debugRenderer->drawRectangle2D(glm::vec2(0.0f, 0.0f), glm::vec2(usedBytesRatio, 16.0f / w), 0x00aa00);
+
+	m_debugRenderer->drawRectangle2D(glm::vec2(0.0f, 16.0f / w), glm::vec2(1.0f, 32.0f / w), 0x111111);
 
 	const float pixelWidth = 1.0f / static_cast<float>(graphics::resolution.width);
 
@@ -1822,7 +2252,7 @@ void World::_debugDrawChunkAllocator()
 				const float fracOffset = static_cast<float>(allocInfo.offset) / static_cast<float>(totalBytes);
 				const float fracSize = std::max(static_cast<float>(allocInfo.size) / static_cast<float>(totalBytes), pixelWidth);
 
-				m_debugRenderer->drawRectangle2D(glm::vec2(fracOffset, 16.0f / 720.0f), glm::vec2(fracOffset + fracSize, 32.0f / 720.0f), 0xffff00);
+				m_debugRenderer->drawRectangle2D(glm::vec2(fracOffset, 16.0f / w), glm::vec2(fracOffset + fracSize, 32.0f / w), 0xffff00);
 			}
 			{
 				VmaAllocationInfo allocInfo;
@@ -1831,7 +2261,7 @@ void World::_debugDrawChunkAllocator()
 				const float fracOffset = static_cast<float>(allocInfo.offset) / static_cast<float>(totalBytes);
 				const float fracSize = std::max(static_cast<float>(allocInfo.size) / static_cast<float>(totalBytes), pixelWidth);
 
-				m_debugRenderer->drawRectangle2D(glm::vec2(fracOffset, 16.0f / 720.0f), glm::vec2(fracOffset + fracSize, 32.0f / 720.0f), 0x00ffff);
+				m_debugRenderer->drawRectangle2D(glm::vec2(fracOffset, 16.0f / w), glm::vec2(fracOffset + fracSize, 32.0f / w), 0x00ffff);
 			}
 		}
 	}

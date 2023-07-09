@@ -13,13 +13,16 @@ layout(location = 1) out float out_DistanceToEye;
 
 void main()
 {
-	float intensity = saturate(dot(in_Normal.xyz, -normalize(u_lightDir)));
+	float intensity = pow(saturate(dot(in_Normal.xyz, -normalize(u_lightDir)) * 0.5 + 0.5), 2.0);
 	float intensity2 = 0.0;
 
 	/*vec3 color = mix(
 		vec3(64.0, 41.0, 5.0) / vec3(255.0, 255.0, 255.0), 
 		vec3(0.0, 1.0, 0.0), 
 		saturate(-in_Normal.y - 0.5));*/
+
+	float sunBrightness = 100.0;
+	intensity *= sunBrightness;
 
 	vec3 color = vec3(0.3, 0.3, 0.35);
 

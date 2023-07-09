@@ -14,8 +14,13 @@ project "surface"
 	cppdialect "C++latest"
 
 	links {
-		"noise",
+		"libnoise",
 		"vulkan-1",
+	}
+	links {
+		"LinearMath_vs2010_x64_%{cfg.buildcfg}",
+		"BulletCollision_vs2010_x64_%{cfg.buildcfg}",
+		"BulletDynamics_vs2010_x64_%{cfg.buildcfg}",
 	}
 
 	files {
@@ -35,12 +40,15 @@ project "surface"
 	includedirs {
 		"src",
 		"extlib/libnoise/include",
+		"extlib/bullet3/include",
 		"extlib/glm",
 		vulkanSdkPath .. "/Include",
 	}
 
 	libdirs {
 		vulkanSdkPath .. "/Lib",
+		"extlib/libnoise/lib/%{cfg.platform}/%{cfg.buildcfg}",
+		"extlib/bullet3/lib/%{cfg.platform}/%{cfg.buildcfg}",
 	}
 
 	defines {
@@ -110,17 +118,11 @@ project "surface"
 			"_DEBUG",
 			"CONFIG_DEBUG",
 		}
-		libdirs {
-			"extlib/libnoise/lib/%{cfg.platform}/Debug/",
-		}
 		optimize "Off"
 		symbols "On"
 
 	filter "configurations:not Debug"
 		defines { "NDEBUG" }
-		libdirs {
-			"extlib/libnoise/lib/%{cfg.platform}/Release/",
-		}
 
 	filter "configurations:Release"
 		defines {

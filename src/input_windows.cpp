@@ -70,6 +70,8 @@ WindowsInput::WindowsInput(HWND hwnd)
 	g_keyMap[VK_RSHIFT] = Key_RightShift;
 	g_keyMap[VK_SHIFT] = Key_LeftShift;
 	g_keyMap[VK_MENU] = Key_LeftAlt;
+	g_keyMap[VK_ESCAPE] = Key_Escape;
+	g_keyMap[VK_BACK] = Key_Backspace;
 }
 
 static Input::KeyCode getKeyCodeFromVKey(USHORT vkey)
@@ -118,18 +120,20 @@ bool WindowsInput::wndProc(HWND /*hwnd*/, UINT message, WPARAM wParam, LPARAM lP
 					return false;
 				}
 
-				if (raw->data.keyboard.Flags == RI_KEY_MAKE)
+				const bool pressed = (raw->data.keyboard.Flags == RI_KEY_MAKE);
+
+				m_keyState.set(keyCode, pressed);
+
+				if (pressed)
 				{
-					if (raw->data.keyboard.VKey == VK_F4)
+					if (keyCode == Key_F4 && isKeyDown(Key_LeftAlt))
 					{
 						ExitProcess(1);
 					}
-
-					m_keyState.set(keyCode, true);
-				}
-				else if (raw->data.keyboard.Flags == RI_KEY_BREAK)
-				{
-					m_keyState.set(keyCode, false);
+					if (keyCode == Key_Escape)
+					{
+						releaseMouse();
+					}
 				}
 			}
 
